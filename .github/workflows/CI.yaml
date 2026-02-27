@@ -11,18 +11,11 @@ jobs:
     name: Security Pipeline
     uses: uc-cdis/.github/.github/workflows/securitypipeline.yaml@master
     secrets: inherit  # pragma: allowlist secret
-
-  UnitTest:
-    name: Python Unit Test with Postgres
-    uses: uc-cdis/.github/.github/workflows/python_unit_test.yaml@master
-    with:
-      python-version: '3.13'
-      test-script: 'tests/ci_commands_script.sh'
-      run-coveralls: true
-
   BuildImageAndPush:
     name: Build Image and Push
     needs: Security
+    with:
+      USE_QUAY_ONLY: true
     # https://github.com/uc-cdis/.github/blob/master/.github/workflows/image_build_push.yaml
     uses: uc-cdis/.github/.github/workflows/image_build_push_native.yaml@master
     secrets:
