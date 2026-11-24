@@ -1,20 +1,52 @@
-FROM golang:1.26.0-alpine AS build
+ARG AZLINUX_BASE_VERSION=hardened
+FROM quay.io/cdis/amazonlinux-base:${AZLINUX_BASE_VERSION} AS base
 
-RUN apk --update add \
-      ca-certificates \
-      git
+FROM --platform=$BUILDPLATFORM quay.io/cdis/amazonlinux-base:${AZLINUX_BASE_VERSION} AS build
+ARG BUILDARCH
+ARG TARGETOS
+ARG TARGETARCH
+ARG GO_VERSION=1.26.4
+ARG GO_SHA256_AMD64=1153d3d50e0ac764b447adfe05c2bcf08e889d42a02e0fe0259bd47f6733ad7f
+ARG GO_SHA256_ARM64=ef758ae7c6cf9267c9c0ef080b8965f453d89ab2d25d9eb22de4405925238768
 
-RUN mkdir /aws-sigv4-proxy
-WORKDIR /aws-sigv4-proxy
-COPY  . .
+RUN dnf install -y --nodocs --setopt=install_weak_deps=False git tar gzip \
+    && dnf clean all
 
-RUN go env -w GOPROXY=direct
+RUN case "${BUILDARCH}" in \
+        amd64) sha="${GO_SHA256_AMD64}" ;; \
+        arm64) sha="${GO_SHA256_ARM64}" ;; \
+        *) echo "unsupported BUILDARCH=${BUILDARCH}" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL -o /tmp/go.tgz "https://go.dev/dl/go${GO_VERSION}.linux-${BUILDARCH}.tar.gz" \
+    && echo "${sha}  /tmp/go.tgz" | sha256sum -c - \
+    && tar -C /usr/local -xzf /tmp/go.tgz \
+    && rm /tmp/go.tgz
 
-RUN CGO_ENABLED=0 GOOS=linux go build ./cmd/aws-sigv4-proxy
+# Dependencies come from the committed vendor directory; nothing is downloaded.
+ENV PATH="/usr/local/go/bin:${PATH}" \
+    CGO_ENABLED=0 \
+    GOOS=${TARGETOS} \
+    GOARCH=${TARGETARCH} \
+    GOTOOLCHAIN=local \
+    GOFLAGS=-mod=vendor \
+    GOPROXY=off \
+    GOFIPS140=v1.0.0
+
+WORKDIR /src
+COPY . .
+RUN go build -trimpath -ldflags="-s -w" -o /out/aws-sigv4-proxy ./cmd/aws-sigv4-proxy
 
 FROM scratch
-COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-COPY --from=build /aws-sigv4-proxy/aws-sigv4-proxy ./
+COPY --from=base /etc/passwd /etc/group /etc/
+COPY --from=base /etc/pki /etc/pki
+COPY --from=base /etc/ssl /etc/ssl
+COPY --from=base /etc/crypto-policies /etc/crypto-policies
+COPY --from=base /etc/localtime /etc/localtime
+COPY --from=base /usr/share/zoneinfo /usr/share/zoneinfo
+COPY --from=build /out/aws-sigv4-proxy /aws-sigv4-proxy
 
-ENTRYPOINT [ "./aws-sigv4-proxy" ]
-
+# gen3-helm and the README mount AWS credentials at /root/.aws
+ENV LC_ALL=C.UTF-8 LANG=C.UTF-8 HOME=/root
+# gen3, numeric so Kubernetes can enforce runAsNonRoot
+USER 1000:1000
+ENTRYPOINT ["/aws-sigv4-proxy"]
